@@ -4,21 +4,42 @@
 #include <ctype.h>
 #include "../include/nova.h"
 
-// Tablas globales para funciones y módulos importados
+#define MAX_ALIASES 20
+
+typedef struct {
+    char alias[32];
+    char module[32];
+} ModuleAlias;
+
+// Tablas globales
 Function functions[MAX_FUNCS];
 int func_count = 0;
 
-// Declaración previa para ejecución recursiva de bloques
+ModuleAlias module_aliases[MAX_ALIASES];
+int alias_count = 0;
+
+// Declaración previa
 void execute_block(char lines[][MAX_LINE_LENGTH], int start, int end, Variable *vars, int *var_count, int *returned, int *return_val);
 
-// Ejecutar una función definida por el usuario
+// Traducir alias en la línea (ej: hw.get_cpu_temp() -> get_cpu_temp())
+void apply_aliases(char *line) {
+    for (int a = 0; a < alias_count; a++) {
+        char prefix[64];
+        snprintf(prefix, sizeof(prefix), "%s.", module_aliases[a].alias);
+        char *p = strstr(line, prefix);
+        if (p != NULL) {
+            memmove(p, p + strlen(prefix), strlen(p + strlen(prefix)) + 1);
+            break;
+        }
+    }
+}
+
 int call_function(const char *func_name, int arg_val, int *returned, int *return_val) {
     for (int f = 0; f < func_count; f++) {
         if (strcmp(functions[f].name, func_name) == 0) {
             Variable local_vars[MAX_VARS];
             int local_var_count = 0;
             
-            // Asignar el argumento a la variable del parámetro de la función
             if (strlen(functions[f].param) > 0) {
                 set_var(local_vars, &local_var_count, functions[f].param, arg_val);
             }
@@ -39,31 +60,36 @@ int call_function(const char *func_name, int arg_val, int *returned, int *return
 void execute_block(char lines[][MAX_LINE_LENGTH], int start, int end, Variable *vars, int *var_count, int *returned, int *return_val) {
     int i = start;
     while (i < end) {
-        if (returned && *returned) break; // Si hubo return, salir del bloque
+        if (returned && *returned) break;
 
         char line[MAX_LINE_LENGTH];
         strcpy(line, lines[i]);
         trim(line);
 
-        // Omitir líneas vacías o comentarios
         if (strlen(line) == 0 || strncmp(line, "//", 2) == 0) {
             i++;
             continue;
         }
 
-        // 1. Manejar importación de módulos SIN comillas (ej: import math)
+        // 1. Manejar import y import ... as ... (ej: import hardware as hw)
         if (strncmp(line, "import ", 7) == 0) {
-            char mod_name[64];
-            if (sscanf(line, "import %s", mod_name) == 1) {
+            char mod_name[32] = "", alias_name[32] = "";
+            if (sscanf(line, "import %s as %s", mod_name, alias_name) == 2) {
                 trim(mod_name);
-                // Los módulos ya están enlazados por gcc, esto actúa como validación o namespace formal
-                // printf("[Nova Module] Imported: %s\n", mod_name);
+                trim(alias_name);
+                if (alias_count < MAX_ALIASES) {
+                    strcpy(module_aliases[alias_count].module, mod_name);
+                    strcpy(module_aliases[alias_count].alias, alias_name);
+                    alias_count++;
+                }
+            } else if (sscanf(line, "import %s", mod_name) == 1) {
+                trim(mod_name);
             }
             i++;
             continue;
         }
 
-        // 2. Manejar importación de archivos CON comillas (ej: #import "utils.nv")
+        // 2. Manejar importación de archivos de scripts (#import "file.nv")
         if (strncmp(line, "#import", 7) == 0) {
             char filename[128] = "";
             if (sscanf(line, "#import \"%[^\"]\"", filename) == 1 || sscanf(line, "#import %s", filename) == 1) {
@@ -88,7 +114,7 @@ void execute_block(char lines[][MAX_LINE_LENGTH], int start, int end, Variable *
             continue;
         }
 
-        // 3. Manejar definición de funciones: def nombre(param) { ... }
+        // 3. Definición de funciones (def)
         if (strncmp(line, "def ", 4) == 0) {
             char fname[32], param[32];
             if (sscanf(line, "def %31[a-zA-Z0-9_](%31[^)])", fname, param) >= 1) {
@@ -112,7 +138,6 @@ void execute_block(char lines[][MAX_LINE_LENGTH], int start, int end, Variable *
                     end_body++;
                 }
 
-                // Copiar las líneas del cuerpo de la función
                 for (int l = start_body; l < end_body; l++) {
                     strcpy(functions[func_count].lines[functions[func_count].line_count], lines[l]);
                     functions[func_count].line_count++;
@@ -124,7 +149,7 @@ void execute_block(char lines[][MAX_LINE_LENGTH], int start, int end, Variable *
             }
         }
 
-        // 4. Manejar return (ej: return result o return 10)
+        // 4. Return
         if (strncmp(line, "return", 6) == 0) {
             char expr[64];
             if (sscanf(line, "return %s", expr) == 1) {
@@ -140,11 +165,11 @@ void execute_block(char lines[][MAX_LINE_LENGTH], int start, int end, Variable *
             continue;
         }
 
-        // 5. Manejar bucles while
+        // 5. Bucles while
         if (strncmp(line, "while", 5) == 0) {
             char var_name[32];
             int limit;
-            sscanf(line, "while %s > %d", var_name, &limit); // Simplificado para comparaciones mayores
+            sscanf(line, "while %s > %d", var_name, &limit);
 
             int start_body = i + 1;
             int end_body = start_body;
@@ -173,7 +198,10 @@ void execute_block(char lines[][MAX_LINE_LENGTH], int start, int end, Variable *
             continue;
         }
 
-        // 6. Detectar llamadas a funciones con asignación (ej: res = cuadrado(4))
+        // Aplicar traducción de alias antes de evaluar la sentencia o función
+        apply_aliases(line);
+
+        // 6. Llamadas a funciones con asignación
         char fname_call[32], var_assign[32];
         int arg_call;
         if (sscanf(line, "%s = %31[a-zA-Z0-9_](%d)", var_assign, fname_call, &arg_call) == 3) {
