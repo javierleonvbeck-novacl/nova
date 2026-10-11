@@ -1,50 +1,72 @@
 #!/bin/bash
 
-if [ -z "$1" ]; then
-    echo "Usage: nv-modules <local_file.c | github_raw_url>"
+PROJECT_DIR="${NOVA_HOME:-$(pwd)}"
+GITHUB_USER="javierleonvbeck-novacl"
+GITHUB_REPO="nova-modules"
+BRANCH="main"
+
+BASE_RAW_URL="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/$BRANCH/modules"
+API_URL="https://api.github.com/repos/$GITHUB_USER/$GITHUB_REPO/contents/modules"
+
+if [ ! -d "$PROJECT_DIR/modules" ]; then
+    echo "Error: Nova project folder not found at $PROJECT_DIR."
+    echo "Please reinstall Nova using install.sh"
     exit 1
 fi
 
-INPUT="$1"
+COMMAND="$1"
+TARGET="$2"
 
-if [ ! -d "modules" ]; then
-    echo "Error: 'modules' directory not found. Please run this command from the root of your Nova project folder."
-    exit 1
-fi
-
-# Check if the input is a URL (GitHub raw or any web link)
-if [[ "$INPUT" =~ ^https?:// ]]; then
-    # Extract filename from URL
-    FILENAME=$(basename "$INPUT")
-    FILENAME="${FILENAME%%\?*}" # Remove query parameters if present
-    
-    echo "-> Downloading module from GitHub/URL..."
-    curl -sSL "$INPUT" -o "modules/$FILENAME"
-    
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to download module from $INPUT"
+case "$COMMAND" in
+    list)
+        echo "=== Available Modules in Nova Hub ==="
+        if command -v curl &> /dev/null && command -v grep &> /dev/null; then
+            curl -s "$API_URL" | grep '"name":' | cut -d'"' -f4
+        else
+            echo "Error: curl or grep not available to fetch module list."
+        fi
+        ;;
+        
+    install)
+        if [ -z "$TARGET" ]; then
+            echo "Error: Specify a module name to install. (e.g., nv-modules install logic)"
+            exit 1
+        fi
+        
+        echo "-> Fetching module '$TARGET' from GitHub..."
+        MODULE_C_URL="$BASE_RAW_URL/$TARGET/${TARGET}_module.c"
+        DEST_PATH="$PROJECT_DIR/modules/${TARGET}_module.c"
+        
+        curl -sSL "$MODULE_C_URL" -o "$DEST_PATH"
+        
+        if grep -q "404: Not Found" "$DEST_PATH" || [ ! -s "$DEST_PATH" ]; then
+            echo "Error: Module '$TARGET' not found in repository."
+            rm -f "$DEST_PATH"
+            exit 1
+        fi
+        
+        echo "-> Successfully downloaded ${TARGET}_module.c into modules/"
+        
+        # Recompile project
+        echo "-> Recompiling Nova natively..."
+        cd "$PROJECT_DIR"
+        gcc src/main.c src/environment.c src/registry.c modules/*.c -Iinclude -o nova
+        
+        if [ $? -eq 0 ]; then
+            echo "-> Updating global binary in /usr/local/bin/nova..."
+            sudo mv nova /usr/local/bin/nova
+            echo "Success! Module '$TARGET' installed and Nova recompiled."
+        else
+            echo "Error: Compilation failed."
+            exit 1
+        fi
+        ;;
+        
+    *)
+        echo "Nova Package Manager (nv-modules)"
+        echo "Usage:"
+        echo "  nv-modules list              - List all available modules from GitHub"
+        echo "  nv-modules install <module>  - Download, compile and install a module"
         exit 1
-    fi
-    echo "-> Downloaded $FILENAME into modules/"
-else
-    # Local file processing
-    if [ ! -f "$INPUT" ]; then
-        echo "Error: File '$INPUT' not found."
-        exit 1
-    fi
-    FILENAME=$(basename "$INPUT")
-    echo "-> Copying local file $INPUT to modules/..."
-    cp "$INPUT" "modules/$FILENAME"
-fi
-
-echo "-> Recompiling Nova natively..."
-gcc src/main.c src/environment.c src/registry.c modules/*.c -Iinclude -o nova
-
-if [ $? -eq 0 ]; then
-    echo "-> Updating global binary in /usr/local/bin/nova..."
-    sudo mv nova /usr/local/bin/nova
-    echo "Success! Module added and Nova recompiled successfully."
-else
-    echo "Error: Compilation failed."
-    exit 1
-fi
+        ;;
+esac
